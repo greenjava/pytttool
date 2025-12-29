@@ -14,6 +14,62 @@ PRODUCT_ID_SIZE = 2  # uint16_t, little endian
 ALLOWED_LANGUAGES = {"GERMAN", "DUTCH", "FRENCH", "ITALIA", "RUSSIA", "ENGLISH"}
 
 
+def print_gme_info(filepath):
+    """Print general info about a GME file (extended fields)."""
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError(f"File '{filepath}' does not exist.")
+    with open(filepath, "rb") as f:
+        buffer = bytearray(f.read())
+    if len(buffer) < HEADER_SIZE:
+        raise ValueError("Input file is too short to be a valid GME file.")
+    # Product ID
+    product_id = buffer[0] + (buffer[1] << 8)
+    # Raw XOR value (uint32_le at 0x0C)
+    raw_xor = buffer[0x0C] + (buffer[0x0D] << 8) + (buffer[0x0E] << 16) + (buffer[0x0F] << 24)
+    # Magic XOR value (byte at 0x12)
+    magic_xor = buffer[0x12]
+    # Comment: null-terminated string from 0x1C (max 32 bytes)
+    comment_bytes = buffer[0x1C:0x3C]
+    comment = comment_bytes.split(b'\x00')[0].decode(errors="replace")
+    # Version string length at 0x20, string at 0x21
+    version_len = buffer[VERSION_OFFSET]
+    version_bytes = buffer[VERSION_OFFSET + 1: VERSION_OFFSET + 1 + version_len]
+    version = version_bytes.decode(errors="replace")
+    # Date (8 ASCII digits) follows version string, if present
+    date = ""
+    lang_pos = VERSION_OFFSET + 1 + version_len
+    if lang_pos + 8 <= len(buffer) and all(chr(buffer[lang_pos + i]).isdigit() for i in range(8)):
+        date = "".join(chr(buffer[lang_pos + i]) for i in range(8))
+        lang_pos += 8
+    # Language
+    if LANG_BLOCK_END < lang_pos:
+        language = ""
+    else:
+        lang_max_len = LANG_BLOCK_END - lang_pos
+        lang_bytes = buffer[lang_pos:lang_pos + lang_max_len]
+        language = lang_bytes.split(b'\x00', 1)[0].decode(errors="replace")
+    # Checksum
+    checksum_found = buffer[-4] + (buffer[-3] << 8) + (buffer[-2] << 16) + (buffer[-1] << 24)
+    checksum_calc = sum(buffer[:-4]) & 0xFFFFFFFF
+
+    print(f"GME file: {filepath}")
+    print(f"  Product ID           : {product_id}")
+    print(f"  Raw XOR value        : 0x{raw_xor:08X}")
+    print(f"  Magic XOR value      : 0x{magic_xor:02X}")
+    print(f"  Comment              : {comment}")
+    print(f"  Version              : {version}")
+    if date:
+        print(f"  Date                 : {date}")
+    print(f"  Language             : {language if language else '(not set)'}")
+    print(f"  Checksum found       : 0x{checksum_found:08X}")
+    if checksum_found == checksum_calc:
+        print(f"  Checksum calculated  : 0x{checksum_calc:08X} (OK)")
+    else:
+        print(f"  Checksum calculated  : 0x{checksum_calc:08X} (DIFFERENT)")
+    print(f"  File size            : {len(buffer)} bytes")
+    # The rest ("Number of registers", "Initial registers", etc) requires GME-specific further parsing
+
+
 def update_gme_checksum(buffer):
     """Compute and update the checksum in the last 4 bytes of the buffer."""
     if len(buffer) < CHECKSUM_LENGTH:
@@ -35,6 +91,8 @@ def write_buffer_to_file(filepath, buffer):
 
 
 def set_gme_language(filepath, language):
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError(f"File '{filepath}' does not exist.")
     if language.upper() not in ALLOWED_LANGUAGES:
         raise ValueError(
             f"Invalid language '{language}'. "
@@ -63,6 +121,8 @@ def set_gme_language(filepath, language):
 
 def set_gme_product_id(filepath, product_id):
     """Set the product id field of a GME file, update the checksum, and save in place."""
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError(f"File '{filepath}' does not exist.")
     if not (0 <= product_id < 65536):
         raise ValueError("Product ID must be in range 0–65535.")
     with open(filepath, "rb") as f:
@@ -113,6 +173,16 @@ def main():
         help="GME file to modify"
     )
 
+    # info command
+    info_parser = subparsers.add_parser(
+        'info',
+        help="Print general information about a GME file",
+        description="Print general information about a GME file"
+    )
+    info_parser.add_argument(
+        'gmefile',
+        help="GME file to analyze"
+    )
     args = parser.parse_args()
 
     if args.command == "set-language":
@@ -126,6 +196,12 @@ def main():
         try:
             set_gme_product_id(args.gmefile, args.product_id)
             print(f"Product ID updated to '{args.product_id}' successfully.")
+        except Exception as e:
+            print("Error:", e, file=sys.stderr)
+            sys.exit(1)
+    elif args.command == "info":
+        try:
+            print_gme_info(args.gmefile)
         except Exception as e:
             print("Error:", e, file=sys.stderr)
             sys.exit(1)
